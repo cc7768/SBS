@@ -7,6 +7,9 @@ using QuantEcon
 
 import QuantEcon.simulate, QuantEcon.solve
 
+include("stable_regressions.jl")
+using .StableReg
+
 
 #
 # Set up types for holding model and solution
@@ -131,10 +134,12 @@ function solve(m::IFP, policy::IFP_Sol; δ=0.05, tol=1e-8, maxiter=2500, k=250, 
     # Allocate some array space
     G = build_grid(m, policy, k, N, T)
     Φ = complete_polynomial(G', 3)  # Get big basis matrix
+    Φ2 = view(Φ, :, 2:size(Φ, 2))
     Astar = Array{Float64}(k)
     V = Array{Float64}(k)
     temp = Array{Float64}(n_complete(2, 3))
     d = BasisMatrices.Degree{3}()
+    reg = RLSSVD(intercept=true, already_has_intercept=false)
 
     # First to get a sensible value function, iterate to convergence for the first policy
     while (dist > 1e-4)
@@ -144,7 +149,7 @@ function solve(m::IFP, policy::IFP_Sol; δ=0.05, tol=1e-8, maxiter=2500, k=250, 
             V[i_s] = eval_V!(temp, m, policy, a_t, w_t, atp1)
         end
 
-        c_V_upd = Φ \ V
+        c_V_upd = regress(reg, Φ2, V)
         dist = maximum(abs, policy.c_V - c_V_upd)
         copy!(policy.c_V, c_V_upd)
         println(dist)
@@ -155,11 +160,13 @@ function solve(m::IFP, policy::IFP_Sol; δ=0.05, tol=1e-8, maxiter=2500, k=250, 
     while (dist > tol) & (iter < maxiter)
         # Rebuild the grid each of first 25 iterations and every 25 iterations
         # thereafter
-        if iter % 5 == 0
+        # if iter % 10 == 0
+        if dist < 1e-3
             println("Rebuilding grid")
             ts = time()
             G = build_grid(m, policy, k, N, T)
             Φ = complete_polynomial(G', 3)  # Get big basis matrix
+            Φ2 = view(Φ, :, 2:size(Φ, 2))
             te = time() - ts
             println("\tRebuilding grid took $(round(te, 2)) seconds")
             println("\tNew grid extrema are $(extrema(G, 2))")
@@ -186,14 +193,15 @@ function solve(m::IFP, policy::IFP_Sol; δ=0.05, tol=1e-8, maxiter=2500, k=250, 
                 V[i_s] = eval_V!(temp, m, policy, a_t, w_t, atp1)
             end
 
-            c_V_upd = Φ \ V
+            c_V_upd = regress(reg, Φ2, V)
             copy!(policy.c_V, c_V_upd)
         end
 
         # Update coefficients
         Φ = complete_polynomial(G', 3)  # Get big basis matrix
-        c_a_upd = Φ \ Astar
-        c_V_upd = Φ \ V
+        Φ2 = view(Φ2, :, 2:size(Φ, 2))
+        c_a_upd = regress(reg, Φ2, Astar)
+        c_V_upd = regress(reg, Φ2, V)
 
         # Compute distance in policy coeffs
         iter = iter + 1
