@@ -7,6 +7,9 @@ using QuantEcon
 
 import QuantEcon.simulate, QuantEcon.solve
 
+include("stable_regressions.jl")
+using .StableReg
+
 
 #
 # Set up types for holding model and solution
@@ -158,17 +161,20 @@ function solve(
     # Initialize counters
     dist, iter = 10.0, 0
     d = BasisMatrices.Degree{3}()
+    reg = RLSSVD(intercept=true)
 
     # Allocate some array space
     G = build_grid(m, policy, k, N, T)
     Φ = complete_polynomial(G', 3)  # Get big basis matrix
+    Φ2 = view(Φ, :, 2:size(Φ, 2))
     Astar = Array{Float64}(k)
     V = Array{Float64}(k)
     temp = Array{Float64}(n_complete(2, 3))
 
     # First to get a sensible value function, iterate to convergence for the first policy
     iterate_given_policy!(V, m, policy, G, k)
-    copy!(policy.c_V, Φ\V)
+    c_V_upd = regress(reg, Φ2, V)
+    copy!(policy.c_V, c_V_upd)
 
     # Iterate till convergence
     while (dist > tol) & (iter < maxiter)
@@ -183,6 +189,7 @@ function solve(
 
         # Build full basis matrix
         Φ = complete_polynomial(G', 3)
+        Φ2 = view(Φ, :, 2:size(Φ, 2))
 
         # Iterate over states
         for i_s in 1:k
@@ -193,14 +200,14 @@ function solve(
             lb, ub = 0.0, expendables_t(m, a_t, w_t) - 1e-8
             res = golden_method(
                 atp1 -> -eval_V!(temp, m, policy, a_t, w_t, atp1), lb, ub
-               )[1]
+               )
 
             # Update policy
-            Astar[i_s] = res
+            Astar[i_s] = res[1]
         end
 
         # Update coefficients and compute distance
-        c_a_upd = Φ \ Astar
+        c_a_upd = regress(reg, Φ2, Astar)
         copy!(policy.c_a, (1.0-δ)*policy.c_a .+ δ*c_a_upd)
         dist = maximum(abs, policy.c_a - c_a_upd)
         iter = iter + 1
