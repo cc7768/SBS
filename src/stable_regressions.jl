@@ -333,15 +333,13 @@ end
     κ::Float64=100_000.0
     standardize::Bool = true
     intercept::Bool = true
-    already_has_intercept::Bool = false
     @assert κ > 0 "κ must be positive"
-    @assert !(intercept && already_has_intercept) "Can't add an intercept and already have one"
-    @assert !(standardize && !(intercept || already_has_intercept)) "must have intercept if standardizing"
+    @assert !(standardize && !(intercept)) "must have intercept if standardizing"
 end
 
 # API methods
 should_standardize(m::RLSSVD) = m.standardize
-should_add_intercept(m::RLSSVD) = m.intercept && (!m.already_has_intercept)
+should_add_intercept(m::RLSSVD) = m.intercept
 function slopes(m::RLSSVD, x, y)
     U, S, V = svd(x, thin=true)
 
