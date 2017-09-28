@@ -34,6 +34,8 @@ end
 
 
 u(m::IFP, c) = ifelse(c > 1e-10, c^(1.0 - m.γ) / (1.0 - m.γ), -1e10)
+du(m::IFP, c) = ifelse(c > 1e-10, c^(-m.γ), 1e10)
+duinv(m::IFP, x) = x^(-1.0 / m.γ)
 expendables_t(m::IFP, a, w) = (1.0 + m.r)*a + w
 
 
@@ -45,9 +47,10 @@ end
 function IFP_Sol()
     # Guess policy of
     # atp1 = 0.9*at + 0.15*wt
-    #      1    x    x^2  x^3  x^2y xy  xy^2  y    y^2  y^3
-    c_a = [0.0, 0.75, 0.0, 0.0, 0.35, 0.0]
+    #      1    x    x^2  xy     y    y^2
+    c_a = [-1.0, 1.0, 0.0, 0.0, 0.75, 0.0]
     c_V = zeros(6)
+    #      1    x    x^2  x^3  x^2y xy  xy^2  y    y^2  y^3
     # c_a = [0.0, 0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.35, 0.0, 0.0]
     # c_V = zeros(10)
 
@@ -99,12 +102,12 @@ function simulate(m::IFP, policy::IFP_Sol, N::Int, T::Int,
     for n in 1:N
         a, w = a0, w0
         for t in 1:T
-            a = dot(c_a, complete_polynomial!(temp, [a, w], d))
+            a = max(dot(c_a, complete_polynomial!(temp, [a, w], d)), 0.0)
             w = w^ρ * exp(σ*randn())
         end
 
         # Store the current asset and wage
-        sim_out[1, n] = max(a, 0.0)
+        sim_out[1, n] = a
         sim_out[2, n] = w
     end
 
@@ -169,8 +172,12 @@ end
 
 
 function solve(
-    m::IFP, policy::IFP_Sol; δ=0.05, tol=1e-8, maxiter=2500, k=250, N=5000, T=750
+    m::IFP, policy::IFP_Sol; δ=0.05, tol=1e-8, maxiter=2500, k=250, N=2500, T=1250
    )
+
+    # Pull out useful info
+    β, ρ, σ, r = m.β, m.ρ, m.σ, m.r
+    nodes, weights = m.nodes, m.weights
 
     # Initialize counters
     dist, iter = 10.0, 0
@@ -185,11 +192,6 @@ function solve(
     V = Array{Float64}(k)
     temp = Array{Float64}(n_complete(2, 2))
 
-    # First to get a sensible value function, iterate to convergence for the first policy
-    iterate_given_policy!(V, m, policy, G, k)
-    c_V_upd = regress(reg, Φ2, V)
-    copy!(policy.c_V, c_V_upd)
-
     # Iterate till convergence
     while (dist > tol) & (iter < maxiter)
 
@@ -197,7 +199,7 @@ function solve(
         if (dist < 1e-2) & (iter % 15 == 0)
             println("Rebuilding grid")
             ts = time()
-            G = build_grid(m, policy, k, N, T, maximum(G[1, :]), maximum(G[2, :]))
+            G = build_grid(m, policy, k, N, T, 10.0, 1.0)
             te = time() - ts
             println("\tRebuilding grid took $(round(te, 2)) seconds")
             println("\tNew grid extrema are $(extrema(G, 2))")
@@ -212,17 +214,25 @@ function solve(
             # Pull out current state
             a_t, w_t = G[:, i_s]
 
-            # Maximize by minimizing the negative value
-            lb, ub = 0.0, expendables_t(m, a_t, w_t) - 1e-8
-            res = optimize(
-                atp1 -> -eval_V!(temp, m, policy, a_t, w_t, atp1), lb, ub
-               )
+            # Evaluate current savings policy
+            a_tp1 = dot(policy.c_a, complete_polynomial!(temp, [a_t, w_t], d))
 
-            # Update policy
-            # if ~res.converged
-            #     println("Failed to converge for $i_s")
-            # end
-            Astar[i_s] = res.minimizer
+            # Compute RHS of EE
+            rhs_ee = 0.0
+            for (_node, _weight) in zip(nodes, weights)
+                # Tomorrow's wage and corresponding savings
+                w_tp1 = w_t^ρ * exp(σ*randn())
+                a_tp2 = dot(policy.c_a, complete_polynomial!(temp, [a_tp1, w_tp1], d))
+
+                c_tp1 = expendables_t(m, a_t, w_t) - a_tp2
+                rhs_ee += β * du(m, c_tp1) * (1.0 + r)
+            end
+
+            # Compute optimal savings from euler equation
+            c_t = duinv(m, rhs_ee)
+            a_tp1_star = expendables_t(m, a_t, w_t) - c_t
+            Astar[i_s] = a_tp1_star
+
         end
 
         # Update coefficients and compute distance
@@ -231,11 +241,10 @@ function solve(
         copy!(policy.c_a, (1.0-δ)*policy.c_a .+ δ*c_a_upd)
         iter = iter + 1
         println("After $iter the distance is $dist with coeffs $(policy.c_a)")
-        # println("New policy is $(policy.c_a)")
-
-        # Iterate on VF using the new policy
-        iterate_given_policy!(V, m, policy, G, k)
     end
+
+    # Iterate on VF using the new policy
+    iterate_given_policy!(V, m, policy, G, k)
 
     return policy
 end
